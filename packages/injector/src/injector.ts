@@ -187,6 +187,21 @@ function getInjectOptions(type: Type): Type | undefined {
     return;
 }
 
+function getPickArguments(type: Type): Type[] | undefined {
+    if (type.typeName === 'Pick' && type.typeArguments && type.typeArguments.length === 2) {
+        return type.typeArguments;
+    }
+    if (!type.originTypes) return;
+
+    for (const origin of type.originTypes) {
+        if (origin.typeName === 'Pick' && origin.typeArguments && origin.typeArguments.length === 2) {
+            return origin.typeArguments;
+        }
+    }
+
+    return;
+}
+
 /**
  * This is the actual dependency injection container.
  * Every module has its own injector.
@@ -220,9 +235,17 @@ export class Injector implements InjectorInterface {
         return new Injector(module, new BuildContext);
     }
 
-    get<T>(token: T, scope?: Scope): ResolveToken<T> {
+    get<T>(token?: ReceiveType<T> | Token<T>, scope?: Scope): ResolveToken<T> {
         if (!this.resolver) throw new Error('Injector was not built');
-        return this.resolver(token, scope);
+        if ('string' === typeof token || 'number' === typeof token || 'bigint' === typeof token ||
+            'boolean' === typeof token || 'symbol' === typeof token || isFunction(token) || isClass(token) || token instanceof RegExp) {
+            return this.resolver(token, scope) as ResolveToken<T>;
+        } else if (isType(token)) {
+            return this.createResolver(isType(token) ? token as Type : resolveReceiveType(token), scope)(scope);
+        } else if (isArray(token)) {
+            return this.createResolver(resolveReceiveType(token), scope)(scope);
+        }
+        throw new Error(`Invalid get<T> argument given ${token}`);
     }
 
     set<T>(token: T, value: any, scope?: Scope): void {
@@ -554,12 +577,13 @@ export class Injector implements InjectorInterface {
         }
 
         if (options.type.kind === ReflectionKind.objectLiteral) {
-            if (options.type.typeName === 'Pick' && options.type.typeArguments && options.type.typeArguments.length === 2) {
-                if (options.type.typeArguments[0].kind === ReflectionKind.class) {
-                    const module = findModuleForConfig(options.type.typeArguments[0].classType, resolveDependenciesFrom);
+            const pickArguments = getPickArguments(options.type);
+            if (pickArguments) {
+                if (pickArguments[0].kind === ReflectionKind.class) {
+                    const module = findModuleForConfig(pickArguments[0].classType, resolveDependenciesFrom);
                     if (module) {
                         const fullConfig = compiler.reserveVariable('fullConfig', module.getConfig());
-                        let index = options.type.typeArguments[1];
+                        let index = pickArguments[1];
                         if (index.kind === ReflectionKind.literal) {
                             index = { kind: ReflectionKind.union, types: [index] };
                         }
@@ -699,12 +723,13 @@ export class Injector implements InjectorInterface {
 
         if (isWithAnnotations(type)) {
             if (type.kind === ReflectionKind.objectLiteral) {
-                if (type.typeName === 'Pick' && type.typeArguments && type.typeArguments.length === 2) {
-                    if (type.typeArguments[0].kind === ReflectionKind.class) {
-                        const module = findModuleForConfig(type.typeArguments[0].classType, resolveDependenciesFrom);
+                const pickArguments = getPickArguments(type);
+                if (pickArguments) {
+                    if (pickArguments[0].kind === ReflectionKind.class) {
+                        const module = findModuleForConfig(pickArguments[0].classType, resolveDependenciesFrom);
                         if (module) {
                             const fullConfig = module.getConfig();
-                            let index = type.typeArguments[1];
+                            let index = pickArguments[1];
                             if (index.kind === ReflectionKind.literal) {
                                 index = { kind: ReflectionKind.union, types: [index] };
                             }
@@ -838,15 +863,7 @@ export class InjectorContext {
 
     get<T>(token?: ReceiveType<T> | Token<T>, module?: InjectorModule): ResolveToken<T> {
         const injector = this.getInjector(module || this.rootModule);
-        if ('string' === typeof token || 'number' === typeof token || 'bigint' === typeof token ||
-            'boolean' === typeof token || 'symbol' === typeof token || isFunction(token) || isClass(token) || token instanceof RegExp) {
-            return injector.get(token, this.scope) as ResolveToken<T>;
-        } else if (isType(token)) {
-            return injector.createResolver(isType(token) ? token as Type : resolveReceiveType(token), this.scope)(this.scope);
-        } else if (isArray(token)) {
-            return injector.createResolver(resolveReceiveType(token), this.scope)(this.scope);
-        }
-        throw new Error(`Invalid get<T> argument given ${token}`);
+        return injector.get(token, this.scope);
     }
 
     instantiationCount(token: Token, module?: InjectorModule, scope?: string): number {

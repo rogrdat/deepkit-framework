@@ -4,8 +4,9 @@ import { databaseFactory } from './factory';
 import { User, UserCredentials } from '@deepkit/orm-integration';
 import { SQLiteDatabaseAdapter, SQLiteDatabaseTransaction } from '../src/sqlite-adapter';
 import { sleep } from '@deepkit/core';
-import { AutoIncrement, cast, Entity, entity, PrimaryKey, Reference, ReflectionClass, typeOf } from '@deepkit/type';
-import { DatabaseEntityRegistry } from '@deepkit/orm';
+import { AutoIncrement, cast, Entity, entity, PrimaryKey, Reference, ReflectionClass, serialize, typeOf, UUID, uuid } from '@deepkit/type';
+import { Database, DatabaseEntityRegistry } from '@deepkit/orm';
+import { BackReference } from '@deepkit/type';
 
 test('reflection circular reference', () => {
     const user = ReflectionClass.from(User);
@@ -262,4 +263,40 @@ test('connection pool', async () => {
         await sleep(0.01);
         expect(c12).toBe(c2);
     }
+});
+
+test('optional', async () => {
+    @entity.name('entity')
+    class MyEntity {
+        id: number & PrimaryKey & AutoIncrement = 0;
+        value?: string;
+    }
+
+    const database = new Database(new SQLiteDatabaseAdapter(), [MyEntity]);
+    await database.migrate();
+
+    const entity1 = new MyEntity();
+    expect('value' in entity1).toBe(false);
+    expect('value' in serialize<MyEntity>(entity1)).toBe(false);
+
+    await database.persist(entity1);
+
+    const entity2 = await database.query(MyEntity).findOne();
+    expect('value' in entity2).toBe(false);
+    expect('value' in serialize<MyEntity>(entity1)).toBe(false);
+});
+
+test('uuid', async () => {
+    @entity.name('my-entity')
+    class MyEntity {
+        id: UUID & PrimaryKey = uuid();
+    }
+
+    const database = new Database(new SQLiteDatabaseAdapter(), [MyEntity]);
+    await database.migrate();
+    const ent = new MyEntity();
+    await database.persist(ent);
+    expect(await database.query(MyEntity).count()).toBe(1);
+    await database.remove(ent);
+    expect(await database.query(MyEntity).count()).toBe(0);
 });

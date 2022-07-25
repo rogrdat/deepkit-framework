@@ -8,8 +8,9 @@
  * You should have received a copy of the MIT License along with this program.
  */
 import { expect, test } from '@jest/globals';
-import { reflect, ReflectionClass } from '../src/reflection/reflection';
+import { reflect, ReflectionClass, typeOf } from '../src/reflection/reflection';
 import {
+    assertType,
     AutoIncrement,
     BackReference,
     BinaryBigInt,
@@ -22,13 +23,16 @@ import {
     PrimaryKey,
     Reference,
     ReflectionKind,
-    SignedBinaryBigInt
+    SignedBinaryBigInt,
+    TypeProperty,
+    TypePropertySignature
 } from '../src/reflection/type';
-import { createSerializeFunction, getSerializeFunction, serializer } from '../src/serializer';
+import { createSerializeFunction, getSerializeFunction, NamingStrategy, serializer } from '../src/serializer';
 import { cast, deserialize, serialize } from '../src/serializer-facade';
 import { getClassName } from '@deepkit/core';
 import { entity, t } from '../src/decorator';
 import { Alphanumeric, MaxLength, MinLength, ValidationError } from '../src/validator';
+import { StatEnginePowerUnit, StatWeightUnit } from './types';
 
 test('deserializer', () => {
     class User {
@@ -332,8 +336,8 @@ test('union loose number boolean', () => {
     expect(cast<number | boolean>(2)).toEqual(2);
     expect(cast<number | boolean>('2')).toEqual(2);
     expect(cast<number | boolean>('true')).toEqual(true);
-    expect(() => cast<number | boolean>('true', {loosely: false})).toThrow('Validation error for type');
-    expect(() => cast<number | boolean>('true2', {loosely: false})).toThrow('Validation error for type');
+    expect(() => cast<number | boolean>('true', { loosely: false })).toThrow('Validation error for type');
+    expect(() => cast<number | boolean>('true2', { loosely: false })).toThrow('Validation error for type');
     expect(deserialize<number | boolean>('true2')).toEqual(undefined);
 });
 
@@ -348,7 +352,7 @@ test('union string bigint', () => {
     expect(cast<string | bigint>('a')).toEqual('a');
     expect(cast<string | bigint>(2n)).toEqual(2n);
     expect(cast<string | bigint>(2)).toEqual(2n);
-    expect(cast<string | bigint>('2', {loosely: false})).toEqual('2');
+    expect(cast<string | bigint>('2', { loosely: false })).toEqual('2');
     expect(cast<string | bigint>('2')).toEqual(2n);
     expect(cast<string | bigint>('2a')).toEqual('2a');
 });
@@ -892,4 +896,130 @@ test('disabled constructor', () => {
     expect(called).toBe(false);
     expect(user).toBeInstanceOf(User);
     expect(user).toEqual({ id: 0, title: 'id:' + 0, type: 'nix' });
+});
+
+test('readonly constructor properties', () => {
+    class Pilot {
+        constructor(readonly name: string, readonly age: number) {
+        }
+    }
+
+    expect(cast<Pilot>({ name: 'Peter', age: 32 })).toEqual({ name: 'Peter', age: 32 });
+    expect(cast<Pilot>({ name: 'Peter', age: '32' })).toEqual({ name: 'Peter', age: 32 });
+});
+
+test('naming strategy prefix', () => {
+    class MyNamingStrategy extends NamingStrategy {
+        constructor() {
+            super('my');
+        }
+
+        override getPropertyName(type: TypeProperty | TypePropertySignature, forSerializer: string): string | undefined {
+            return '_' + super.getPropertyName(type, forSerializer);
+        }
+    }
+
+    interface Post {
+        id: number;
+        likesCount: number;
+    }
+
+    interface User {
+        readonly id: number;
+        readonly posts: readonly Post[];
+    }
+
+    {
+        const res = serialize<User>({ id: 2, posts: [{ id: 3, likesCount: 1 }, { id: 4, likesCount: 2 }] }, undefined, undefined, new MyNamingStrategy);
+        expect(res).toEqual({ _id: 2, _posts: [{ _id: 3, _likesCount: 1 }, { _id: 4, _likesCount: 2 }] });
+    }
+
+    {
+        const res = deserialize<User>({ _id: 2, _posts: [{ _id: 3, _likesCount: 1 }, { _id: 4, _likesCount: 2 }] }, undefined, undefined, new MyNamingStrategy);
+        expect(res).toEqual({ id: 2, posts: [{ id: 3, likesCount: 1 }, { id: 4, likesCount: 2 }] });
+    }
+});
+
+test('naming strategy camel case', () => {
+    const camelCaseToSnakeCase = (str: string) =>
+        str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+
+    class CamelCaseToSnakeCaseNamingStrategy extends NamingStrategy {
+        constructor() {
+            super('snake-case-to-camel-case');
+        }
+
+        override getPropertyName(
+            type: TypeProperty | TypePropertySignature,
+            forSerializer: string
+        ): string | undefined {
+            const propertyName = super.getPropertyName(type, forSerializer);
+            return propertyName ? camelCaseToSnakeCase(propertyName) : undefined;
+        }
+    }
+
+    interface Post {
+        id: number;
+        likesCount: number;
+    }
+
+    interface User {
+        id: number;
+        posts: Post[];
+    }
+
+    {
+        const res = serialize<User>({ id: 2, posts: [{ id: 3, likesCount: 1 }, { id: 4, likesCount: 2 }] }, undefined, undefined, new CamelCaseToSnakeCaseNamingStrategy);
+        expect(res).toEqual({ id: 2, posts: [{ id: 3, likes_count: 1 }, { id: 4, likes_count: 2 }] });
+    }
+
+    {
+        const res = deserialize<User>({ id: 2, posts: [{ id: 3, likes_count: 1 }, { id: 4, likes_count: 2 }] }, undefined, undefined, new CamelCaseToSnakeCaseNamingStrategy);
+        expect(res).toEqual({ id: 2, posts: [{ id: 3, likesCount: 1 }, { id: 4, likesCount: 2 }] });
+    }
+});
+
+test('enum union', () => {
+    enum StatEnginePowerUnit {
+        Hp = 'hp',
+    }
+
+    enum StatWeightUnit {
+        Lbs = 'lbs',
+        Kg = 'kg',
+    }
+
+    type StatMeasurementUnit = StatEnginePowerUnit | StatWeightUnit;
+    const type = typeOf<StatMeasurementUnit>();
+    assertType(type, ReflectionKind.union);
+    expect(type.types.length).toBe(2);
+
+    expect(deserialize<StatMeasurementUnit>(StatWeightUnit.Kg)).toBe(StatWeightUnit.Kg);
+    expect(deserialize<StatMeasurementUnit>(StatWeightUnit.Lbs)).toBe(StatWeightUnit.Lbs);
+    expect(deserialize<StatMeasurementUnit>(StatEnginePowerUnit.Hp)).toBe(StatEnginePowerUnit.Hp);
+});
+
+test('union literals in union', () => {
+    type StatWeightUnit = 'lbs' | 'kg';
+    type StatEnginePowerUnit = 'hp';
+
+    type StatMeasurementUnit = StatEnginePowerUnit | StatWeightUnit;
+    const type = typeOf<StatMeasurementUnit>();
+    assertType(type, ReflectionKind.union);
+    expect(type.types.length).toBe(3);
+
+    expect(deserialize<StatMeasurementUnit>('kg')).toBe('kg');
+    expect(deserialize<StatMeasurementUnit>('lbs')).toBe('lbs');
+    expect(deserialize<StatMeasurementUnit>('hp')).toBe('hp');
+});
+
+test('union literals in union imported', () => {
+    type StatMeasurementUnit = StatEnginePowerUnit | StatWeightUnit;
+    const type = typeOf<StatMeasurementUnit>();
+    assertType(type, ReflectionKind.union);
+    expect(type.types.length).toBe(3);
+
+    expect(deserialize<StatMeasurementUnit>('kg')).toBe('kg');
+    expect(deserialize<StatMeasurementUnit>('lbs')).toBe('lbs');
+    expect(deserialize<StatMeasurementUnit>('hp')).toBe('hp');
 });

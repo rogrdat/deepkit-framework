@@ -58,6 +58,41 @@ test('type decorator', () => {
     expect(data).toEqual([]);
 });
 
+test('intersection same type', () => {
+    expect(stringifyType(typeOf<string & string>())).toBe('string');
+    expect(stringifyType(typeOf<number & number>())).toBe('number');
+
+    type MyAnnotation = { __meta?: ['myAnnotation'] };
+    type Username = string & MyAnnotation;
+    expect(stringifyType(typeOf<string & Username>())).toBe('string');
+    expect(stringifyType(typeOf<Username & string>())).toBe('Username');
+});
+
+test('intersection same type keep annotation', () => {
+    type MyAnnotation = { __meta?: ['myAnnotation'] };
+    type Username = string & MyAnnotation;
+    {
+        const type = typeOf<string & Username>();
+        const data = metaAnnotation.getForName(type, 'myAnnotation');
+        expect(data).toEqual([]);
+    }
+    {
+        const type = typeOf<string & string & Username>();
+        const data = metaAnnotation.getForName(type, 'myAnnotation');
+        expect(data).toEqual([]);
+    }
+    {
+        const type = typeOf<Username & string>();
+        const data = metaAnnotation.getForName(type, 'myAnnotation');
+        expect(data).toEqual([]);
+    }
+    {
+        const type = typeOf<Username & string & string>();
+        const data = metaAnnotation.getForName(type, 'myAnnotation');
+        expect(data).toEqual([]);
+    }
+});
+
 test('copy index access', () => {
     interface User {
         password: string & MinLength<6> & MaxLength<30>;
@@ -70,7 +105,7 @@ test('copy index access', () => {
     const type = typeOf<UserCreationPayload>();
 
     assertType(type, ReflectionKind.objectLiteral);
-    const password = findMember('password', type);
+    const password = findMember('password', type.types);
     assertType(password, ReflectionKind.propertySignature);
     assertType(password.type, ReflectionKind.string);
     const validations = validationAnnotation.getAnnotations(password.type);
@@ -92,7 +127,7 @@ test('reset type decorator', () => {
     {
         const type = typeOf<UserCreationPayload>();
         assertType(type, ReflectionKind.objectLiteral);
-        const password = findMember('password', type);
+        const password = findMember('password', type.types);
         assertType(password, ReflectionKind.propertySignature);
         assertType(password.type, ReflectionKind.string);
         const validations = validationAnnotation.getAnnotations(password.type);
@@ -105,7 +140,7 @@ test('reset type decorator', () => {
     {
         const type = typeOf<User>();
         assertType(type, ReflectionKind.objectLiteral);
-        const password = findMember('password', type);
+        const password = findMember('password', type.types);
         assertType(password, ReflectionKind.propertySignature);
         assertType(password.type, ReflectionKind.string);
         const validations = validationAnnotation.getAnnotations(password.type);
@@ -114,7 +149,7 @@ test('reset type decorator', () => {
         expect(groups).toEqual([]);
         expect(excludedAnnotation.isExcluded(password.type, 'json')).toBe(true);
     }
-})
+});
 
 test('type alias preserved', () => {
     type MyString = string;
@@ -247,6 +282,40 @@ test('interface with method', () => {
     }
 
     validExtend<Connection, { id: number, write(data: SubUint16Array): void }>();
+});
+
+test('readonly constructor properties', () => {
+    class Pilot {
+        constructor(readonly name: string, readonly age: number) {
+        }
+    }
+
+    const reflection = ReflectionClass.from(Pilot);
+    expect(reflection.getProperty('name').type.kind).toBe(ReflectionKind.string);
+    expect(reflection.getProperty('age').type.kind).toBe(ReflectionKind.number);
+
+    expect(stringifyResolvedType(typeOf<Pilot>())).toBe(`Pilot {
+  constructor(readonly name: string, readonly age: number);
+  readonly name: string;
+  readonly age: number;
+}`);
+});
+
+test('class with statics', () => {
+    class PilotId {
+        public static readonly none: PilotId = new PilotId(0);
+
+        constructor(public readonly value: number) {
+        }
+
+        static from(value: number) {
+            return new PilotId(value);
+        }
+    }
+
+    expect(stringifyResolvedType(typeOf<PilotId>())).toContain(`constructor(readonly value: number);
+  readonly value: number;
+  static from(value: number): any;`);
 });
 
 test('extendability constructor', () => {
@@ -831,7 +900,7 @@ test('extends complex type', () => {
         }
     }
 
-    const member = findMember('type', reflect(Validation) as TypeClass) as TypeProperty;
+    const member = findMember('type', (reflect(Validation) as TypeClass).types) as TypeProperty;
     expect(isSameType(type, member.type)).toBe(true);
     expect(isExtendable(type, member.type)).toBe(true);
 });
@@ -941,7 +1010,7 @@ test('InlineRuntimeType', () => {
     type SchemaType = InlineRuntimeType<typeof schema>;
     const type = typeOf<SchemaType>();
     assertType(type, ReflectionKind.class);
-    expect(type.typeName).toBe('User');
+    expect(type.typeName).toBe('SchemaType');
 
     assertType(type.types[0], ReflectionKind.property);
     expect(type.types[0].name).toBe('id');
@@ -1093,6 +1162,63 @@ test('any with partial', () => {
     console.log(type);
 });
 
+test('new type decorator on already decorated', () => {
+    type CustomA = { __meta?: ['CustomA'] };
+    type CustomB = { __meta?: ['CustomB'] };
+
+    type O = {} & CustomA;
+    type T = O & CustomB;
+    type Decorate<T> = T & CustomB;
+    type EmptyTo<T> = {} & T & CustomB;
+
+    expect(metaAnnotation.getAnnotations(typeOf<O>())).toEqual([{ name: 'CustomA', options: [] }]);
+    expect(metaAnnotation.getAnnotations(typeOf<T>())).toEqual([{ name: 'CustomA', options: [] }, { name: 'CustomB', options: [] }]);
+    expect(metaAnnotation.getAnnotations(typeOf<Decorate<O>>())).toEqual([{ name: 'CustomA', options: [] }, { name: 'CustomB', options: [] }]);
+    expect(metaAnnotation.getAnnotations(typeOf<EmptyTo<O>>())).toEqual([{ name: 'CustomA', options: [] }, { name: 'CustomB', options: [] }]);
+});
+
+test('keep last type name', () => {
+    interface User {
+        id: number;
+        name: string;
+        password: string;
+    }
+
+    {
+        type ReadUser = Omit<User, 'password'>;
+        const type = typeOf<ReadUser>();
+        expect(type.typeName).toBe('ReadUser');
+        expect(type.originTypes![0].typeName).toBe('Omit');
+    }
+
+    {
+        type UserWithName = Pick<User, 'name'>;
+        const type = typeOf<UserWithName>();
+        expect(type.typeName).toBe('UserWithName');
+        expect(type.typeArguments).toBe(undefined);
+        expect(type.originTypes![0].typeName).toBe('Pick');
+        expect(type.originTypes![0].typeArguments![0].typeName).toBe('User');
+    }
+
+    {
+        type UserWithName = Pick<User, 'name'>;
+        type Bla = UserWithName;
+        const type = typeOf<Bla>();
+        expect(type.typeName).toBe('Bla');
+        expect(type.typeArguments).toBe(undefined);
+        expect(type.originTypes![0].typeName).toBe('UserWithName');
+        expect(type.originTypes![0].typeArguments).toBe(undefined);
+        expect(type.originTypes![1].typeName).toBe('Pick');
+        expect(type.originTypes![1].typeArguments![0].typeName).toBe('User');
+
+        const type2 = typeOf<UserWithName>();
+        expect(type2.typeName).toBe('UserWithName');
+        expect(type2.typeArguments).toBe(undefined);
+        expect(type2.originTypes![0].typeName).toBe('Pick');
+        expect(type2.originTypes![0].typeArguments![0].typeName).toBe('User');
+    }
+});
+
 class User {
     a!: string;
 }
@@ -1105,44 +1231,44 @@ class Setting {
     value!: any;
 }
 
-const types = [
-    typeOf<string>(),
-    typeOf<number>(),
-    typeOf<bigint>(),
-    typeOf<symbol>(),
-    typeOf<undefined>(),
-    typeOf<null>(),
-    typeOf<any>(),
-    typeOf<never>(),
-    typeOf<Date>(),
-    typeOf<'a'>(),
-    typeOf<23>(),
-    typeOf<4n>(),
-    typeOf<true>(),
-    typeOf<string[]>(),
-    typeOf<number[]>(),
-    typeOf<[string]>(),
-    typeOf<[number]>(),
-    typeOf<User[]>(),
-    typeOf<[User]>(),
-    typeOf<User>(),
-    typeOf<Setting>(),
-    typeOf<{ a: string }>(),
-    typeOf<{ a: string, b: number }>(),
-    typeOf<{ b: number }>(),
-    typeOf<{ [index: string]: string }>(),
-    typeOf<{ [index: string]: number }>(),
-    typeOf<{ [index: string]: number | string }>(),
-    typeOf<{ [index: number]: number | string }>(),
-    typeOf<() => void>(),
-    typeOf<(a: string) => void>(),
-    typeOf<(b: number) => void>(),
-    typeOf<(b: string, a: number) => void>(),
-    typeOf<string | number>(),
-    typeOf<string | 'a'>(),
-];
-
 describe('types equality', () => {
+    const types = [
+        typeOf<string>(),
+        typeOf<number>(),
+        typeOf<bigint>(),
+        typeOf<symbol>(),
+        typeOf<undefined>(),
+        typeOf<null>(),
+        typeOf<any>(),
+        typeOf<never>(),
+        typeOf<Date>(),
+        typeOf<'a'>(),
+        typeOf<23>(),
+        typeOf<4n>(),
+        typeOf<true>(),
+        typeOf<string[]>(),
+        typeOf<number[]>(),
+        typeOf<[string]>(),
+        typeOf<[number]>(),
+        typeOf<User[]>(),
+        typeOf<[User]>(),
+        typeOf<User>(),
+        typeOf<Setting>(),
+        typeOf<{ a: string }>(),
+        typeOf<{ a: string, b: number }>(),
+        typeOf<{ b: number }>(),
+        typeOf<{ [index: string]: string }>(),
+        typeOf<{ [index: string]: number }>(),
+        typeOf<{ [index: string]: number | string }>(),
+        typeOf<{ [index: number]: number | string }>(),
+        typeOf<() => void>(),
+        typeOf<(a: string) => void>(),
+        typeOf<(b: number) => void>(),
+        typeOf<(b: string, a: number) => void>(),
+        typeOf<string | number>(),
+        typeOf<string | 'a'>(),
+    ];
+
     for (const a of types) {
         for (const b of types) {
             if (a === b) {

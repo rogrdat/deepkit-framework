@@ -110,3 +110,27 @@ test('class expression', () => {
 
     expect(res.app).toContain('static __type = [');
 });
+
+test('export default function', () => {
+    const res = transform({
+        'app': `
+            export default function(bar: string) {
+                return bar;
+            }
+        `
+    });
+
+    expect(res.app).toContain('export default __assignType(function (bar: string');
+});
+
+test('export default async function', () => {
+    const res = transform({
+        'app': `
+            export default async function(bar: string) {
+                return bar;
+            }
+        `
+    });
+
+    expect(res.app).toContain('export default __assignType(async function (bar: string');
+});

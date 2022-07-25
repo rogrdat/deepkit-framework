@@ -9,6 +9,7 @@
  */
 
 import { ClassType, isClass, isPrototypeOfBase, ProcessLocker } from '@deepkit/core';
+import { EventDispatcher } from '@deepkit/event';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
 import { ApplicationServer, ApplicationServerListener } from './application-server';
@@ -160,7 +161,6 @@ export class FrameworkModule extends createModule({
 
             this.addProvider({
                 provide: OrmBrowserController,
-                deps: [DatabaseRegistry],
                 useFactory: (registry: DatabaseRegistry) => new OrmBrowserController(registry.getDatabases())
             });
             this.addController(DebugController);
@@ -178,7 +178,6 @@ export class FrameworkModule extends createModule({
                 this.addProvider(FileStopwatchStore);
                 this.addProvider({
                     provide: Stopwatch,
-                    deps: [FileStopwatchStore],
                     useFactory(store: FileStopwatchStore) {
                         return new Stopwatch(store);
                     }
@@ -198,11 +197,12 @@ export class FrameworkModule extends createModule({
     protected setupDatabase() {
         for (const db of this.dbs) {
             this.setupProvider<DatabaseRegistry>().addDatabase(db.classType, {}, db.module);
+            db.module.setupProvider(0, db.classType).eventDispatcher = injectorReference(EventDispatcher);
         }
 
         if (this.config.debug && this.config.debugProfiler) {
             for (const db of this.dbs) {
-                this.setupProvider(0, db.classType).stopwatch = injectorReference(Stopwatch);
+                db.module.setupProvider(0, db.classType).stopwatch = injectorReference(Stopwatch);
             }
         }
     }

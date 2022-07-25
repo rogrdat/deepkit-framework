@@ -68,15 +68,15 @@ export class BrokerMemoryServer extends BrokerServer {
 export function createTestingApp<O extends RootModuleDefinition>(options: O, entities: ClassType[] = [], setup?: (module: AppModule<any>) => void): TestingFacade<App<O>> {
     const module = new RootAppModule(options);
 
-    module.setupProvider<Logger>().removeTransport(injectorReference(ConsoleTransport));
-    module.setupProvider<Logger>().addTransport(injectorReference(MemoryLoggerTransport));
+    module.setupGlobalProvider<Logger>().removeTransport(injectorReference(ConsoleTransport));
+    module.setupGlobalProvider<Logger>().addTransport(injectorReference(MemoryLoggerTransport));
 
     module.addProvider({ provide: WebWorkerFactory, useClass: WebMemoryWorkerFactory }); //don't start HTTP-server
     module.addProvider({ provide: BrokerServer, useClass: BrokerMemoryServer }); //don't start Broker TCP-server
     module.addProvider(BrokerMemoryServer);
     module.addProvider(MemoryLoggerTransport);
     module.addProvider({
-        provide: Broker, deps: [BrokerServer], useFactory: (server: BrokerMemoryServer) => {
+        provide: Broker, useFactory: (server: BrokerMemoryServer) => {
             return new DirectBroker(server.kernel);
         }
     });

@@ -7,7 +7,7 @@
  *
  * You should have received a copy of the MIT License along with this program.
  */
-import { asyncOperation, ClassType, CompilerContext, getClassName, isClass, isObject, urlJoin } from '@deepkit/core';
+import { asyncOperation, ClassType, CompilerContext, getClassName, isArray, isClass, isObject, urlJoin } from '@deepkit/core';
 import {
     assertType,
     entity,
@@ -29,7 +29,6 @@ import {
 } from '@deepkit/type';
 // @ts-ignore
 import formidable from 'formidable';
-import querystring from 'querystring';
 import { HttpAction, httpClass, HttpController, HttpDecorator } from './decorator';
 import { BodyValidationError, getRegExp, HttpRequest, HttpRequestQuery, HttpRequestResolvedParameters, ValidatedBody } from './model';
 import { InjectorContext, InjectorModule, TagRegistry } from '@deepkit/injector';
@@ -40,7 +39,7 @@ import { HttpMiddlewareConfig, HttpMiddlewareFn } from './middleware';
 
 //@ts-ignore
 import qs from 'qs';
-import { isArray } from '@deepkit/core';
+import { HtmlResponse, JSONResponse, Response } from './http.js';
 
 export type RouteParameterResolverForInjector = ((injector: InjectorContext) => any[] | Promise<any[]>);
 
@@ -59,7 +58,7 @@ export class UploadedFile {
     size!: number;
 
     /**
-     * The path this file is being written to.
+     * The local path this file is being written to. Will be deleted when request is handled.
      */
     path!: string;
 
@@ -207,7 +206,7 @@ class ParsedRouteParameter {
     getType(): Type {
         if (this.bodyValidation) {
             assertType(this.parameter.type, ReflectionKind.class);
-            const valueType = findMember('value', this.parameter.type);
+            const valueType = findMember('value', this.parameter.type.types);
             if (!valueType || valueType.kind !== ReflectionKind.property) throw new Error(`No property value found at ${stringifyType(this.parameter.type)}`);
             return valueType.type as Type;
         }
@@ -252,7 +251,11 @@ function parseRoutePathToRegex(routeConfig: RouteConfig): { regex: string, param
         const parameter = fn.getParameterOrUndefined(name);
         if (parameter) {
             const regExp = getRegExp(parameter.type);
-            if (regExp) return '(' + regExp + ')';
+            if (regExp instanceof RegExp) {
+                return '(' + regExp.source + ')';
+            } else if (regExp) {
+                return '(' + regExp + ')';
+            }
         }
         return String.raw`([^/]+)`;
     });
@@ -331,14 +334,20 @@ function filterMiddlewaresForRoute(middlewareRawConfigs: MiddlewareRegistryEntry
         if (v.config.selfModule && v.module.id !== routeConfig.module?.id) return false;
 
         if (v.config.routeNames.length) {
+            let found: boolean = false;
             for (const name of v.config.routeNames) {
                 if (name.includes('*')) {
                     const regex = new RegExp('^' + name.replace(/\*/g, '.*') + '$');
-                    if (!regex.test(routeConfig.name)) return false;
-                } else if (name !== routeConfig.name) {
-                    return false;
+                    if (regex.test(routeConfig.name)) {
+                        found = true;
+                        break;
+                    }
+                } else if (name === routeConfig.name) {
+                    found = true;
+                    break;
                 }
             }
+            if (!found) return false;
         }
 
         if (v.config.excludeRouteNames.length) {
@@ -408,6 +417,14 @@ function convertOptions(methods: string[], pathOrOptions: string | HttpRouterFun
     return { ...options, methods };
 }
 
+/**
+ * Annotated types like HTMLResponse/JSONResponse are not used for serialization.
+ */
+function filterValidReturnType(type: Type): Type | undefined {
+    if (type.kind === ReflectionKind.class && (type.classType === HtmlResponse || type.classType === JSONResponse || type.classType === Response)) return;
+    return type;
+}
+
 export abstract class HttpRouterRegistryFunctionRegistrar {
     protected defaultOptions: Partial<HttpRouterFunctionOptions> = {};
 
@@ -453,7 +470,7 @@ export abstract class HttpRouterRegistryFunctionRegistrar {
             type: 'function',
             fn: callback,
         }, action);
-        routeConfig.returnType = fn.getReturnType();
+        routeConfig.returnType = filterValidReturnType(fn.getReturnType());
         this.addRoute(routeConfig);
     }
 
@@ -524,7 +541,7 @@ export abstract class HttpRouterRegistryFunctionRegistrar {
         routeConfig.serializer = options.serializer;
         routeConfig.serializationOptions = options.serializationOptions;
 
-        routeConfig.returnType = fn.getReturnType();
+        routeConfig.returnType = filterValidReturnType(fn.getReturnType());
         this.addRoute(routeConfig);
     }
 }
@@ -587,7 +604,7 @@ export class HttpRouterRegistry extends HttpRouterRegistryFunctionRegistrar {
 
             routeConfig.module = module;
 
-            if (schema.hasMethod(action.methodName)) routeConfig.returnType = schema.getMethod(action.methodName).getReturnType();
+            if (schema.hasMethod(action.methodName)) routeConfig.returnType = filterValidReturnType(schema.getMethod(action.methodName).getReturnType());
             this.addRoute(routeConfig);
         }
     }
@@ -603,11 +620,10 @@ export class HttpRouter {
     protected buildId: number = 0;
     protected resolveFn?: (name: string, parameters: { [name: string]: any }) => string;
 
-    private parseBody(req: HttpRequest, files: { [name: string]: UploadedFile }) {
+    private parseBody(req: HttpRequest, foundFiles: { [name: string]: UploadedFile }) {
         const form = formidable({
             multiples: true,
             hash: 'sha1',
-            enabledPlugins: ['octetstream', 'querystring', 'json'],
         });
         return asyncOperation((resolve, reject) => {
             if (req.body) {
@@ -617,7 +633,17 @@ export class HttpRouter {
                 if (err) {
                     reject(err);
                 } else {
-                    const body = req.body = { ...fields, ...files };
+                    for (const [name, file] of Object.entries(files) as any) {
+                        if (file.size === 0) continue;
+                        foundFiles[name] = {
+                            size: file.size,
+                            path: file.filepath,
+                            name: file.originalFilename,
+                            type: file.mimetype,
+                            lastModifiedDate: file.lastModifiedDate,
+                        }
+                    }
+                    const body = req.body = { ...fields, ...foundFiles };
                     resolve(body);
                 }
             });
@@ -655,7 +681,8 @@ export class HttpRouter {
         const routeConfigVar = compiler.reserveVariable('routeConfigVar', routeConfig);
         const parsedRoute = parseRouteControllerAction(routeConfig);
         const path = routeConfig.getFullPath();
-        const prefix = path.substr(0, path.indexOf(':'));
+        const pathParamStarter = path.indexOf(':')
+        const prefix = path.substr(0, pathParamStarter);
 
         const regexVar = compiler.reserveVariable('regex', new RegExp('^' + parsedRoute.regex + '$'));
         const setParameters: string[] = [];
@@ -664,7 +691,7 @@ export class HttpRouter {
         let bodyValidationErrorHandling = `if (bodyErrors.length) throw ValidationError.from(bodyErrors);`;
 
         let enableParseBody = false;
-        const hasParameters = parsedRoute.getParameters().length > 0;
+        const hasParameters = pathParamStarter !== -1 || parsedRoute.getParameters().length > 0;
         let requiresAsyncParameters = false;
         let setParametersFromPath = '';
 
@@ -748,7 +775,7 @@ export class HttpRouter {
                         ${parameterResolverFoundVar} = true;
                         parameters.${parameter.parameter.name} = await ${instance}.resolve({
                             token: ${injectorTokenVar},
-                            routeConfig: ${routeConfigVar},
+                            route: ${routeConfigVar},
                             request: request,
                             name: ${JSON.stringify(parameter.parameter.name)},
                             value: parameters.${parameter.parameter.name},

@@ -167,7 +167,8 @@ const OPs: { [op in ReflectionOp]?: { params: number } } = {
     [ReflectionOp.propertySignature]: { params: 1 },
     [ReflectionOp.property]: { params: 1 },
     [ReflectionOp.jump]: { params: 1 },
-    [ReflectionOp.enum]: { params: 1 },
+    [ReflectionOp.enum]: { params: 0 },
+    [ReflectionOp.enumMember]: { params: 1 },
     [ReflectionOp.typeParameter]: { params: 1 },
     [ReflectionOp.typeParameterDefault]: { params: 1 },
     [ReflectionOp.mappedType]: { params: 2 },
@@ -703,7 +704,7 @@ export class ReflectionTransformer implements CustomTransformer {
                             ),
                             node.typeArguments,
                             node.arguments
-                        )
+                        );
 
                     } else if (isParenthesizedExpression(node.expression.expression)) {
                         //e.g. (http.deep()).response();
@@ -1084,6 +1085,24 @@ export class ReflectionTransformer implements CustomTransformer {
                         }
                     }
 
+                    if (narrowed.heritageClauses) {
+                        for (const heritage of narrowed.heritageClauses) {
+                            if (heritage.token === SyntaxKind.ExtendsKeyword) {
+                                for (const extendType of heritage.types) {
+                                    program.pushFrame();
+                                    if (extendType.typeArguments) {
+                                        for (const typeArgument of extendType.typeArguments) {
+                                            this.extractPackStructOfType(typeArgument, program);
+                                        }
+                                    }
+                                    const index = program.pushStack(this.f.createArrowFunction(undefined, undefined, [], undefined, undefined, extendType.expression));
+                                    program.pushOp(ReflectionOp.classReference, index);
+                                    program.popFrameImplicit();
+                                }
+                            }
+                        }
+                    }
+
                     for (const member of narrowed.members) {
                         const name = getNameAsString(member.name);
                         if (name) {
@@ -1273,6 +1292,7 @@ export class ReflectionTransformer implements CustomTransformer {
                     if (hasModifier(narrowed, SyntaxKind.PrivateKeyword)) program.pushOp(ReflectionOp.private);
                     if (hasModifier(narrowed, SyntaxKind.ProtectedKeyword)) program.pushOp(ReflectionOp.protected);
                     if (hasModifier(narrowed, SyntaxKind.AbstractKeyword)) program.pushOp(ReflectionOp.abstract);
+                    if (hasModifier(narrowed, SyntaxKind.StaticKeyword)) program.pushOp(ReflectionOp.static);
 
                     if (narrowed.initializer) {
                         //important to use Function, since it will be called using a different `this`
@@ -1391,7 +1411,7 @@ export class ReflectionTransformer implements CustomTransformer {
                     if (hasModifier(parameter, SyntaxKind.PublicKeyword)) program.pushOp(ReflectionOp.public);
                     if (hasModifier(parameter, SyntaxKind.PrivateKeyword)) program.pushOp(ReflectionOp.private);
                     if (hasModifier(parameter, SyntaxKind.ProtectedKeyword)) program.pushOp(ReflectionOp.protected);
-                    if (hasModifier(narrowed, SyntaxKind.ReadonlyKeyword)) program.pushOp(ReflectionOp.readonly);
+                    if (hasModifier(parameter, SyntaxKind.ReadonlyKeyword)) program.pushOp(ReflectionOp.readonly);
                     if (parameter.initializer && parameter.type && !getReceiveTypeParameter(parameter.type)) {
                         program.pushOp(ReflectionOp.defaultValue, program.findOrAddStackEntry(this.f.createArrowFunction(undefined, undefined, [], undefined, undefined, parameter.initializer)));
                     }
@@ -1414,6 +1434,7 @@ export class ReflectionTransformer implements CustomTransformer {
                     if (hasModifier(narrowed, SyntaxKind.PrivateKeyword)) program.pushOp(ReflectionOp.private);
                     if (hasModifier(narrowed, SyntaxKind.ProtectedKeyword)) program.pushOp(ReflectionOp.protected);
                     if (hasModifier(narrowed, SyntaxKind.AbstractKeyword)) program.pushOp(ReflectionOp.abstract);
+                    if (hasModifier(narrowed, SyntaxKind.StaticKeyword)) program.pushOp(ReflectionOp.static);
                 }
                 program.popFrameImplicit();
                 break;
@@ -1530,9 +1551,20 @@ export class ReflectionTransformer implements CustomTransformer {
                 //TypeScript does not narrow types down
                 const narrowed = node as TypeOperatorNode;
 
-                if (narrowed.operator === SyntaxKind.KeyOfKeyword) {
-                    this.extractPackStructOfType(narrowed.type, program);
-                    program.pushOp(ReflectionOp.keyof);
+                switch (narrowed.operator) {
+                    case SyntaxKind.KeyOfKeyword: {
+                        this.extractPackStructOfType(narrowed.type, program);
+                        program.pushOp(ReflectionOp.keyof);
+                        break;
+                    }
+                    case SyntaxKind.ReadonlyKeyword: {
+                        this.extractPackStructOfType(narrowed.type, program);
+                        program.pushOp(ReflectionOp.readonly);
+                        break;
+                    }
+                    default: {
+                        program.pushOp(ReflectionOp.never);
+                    }
                 }
                 break;
             }
@@ -1930,17 +1962,14 @@ export class ReflectionTransformer implements CustomTransformer {
 
                 if (resolved.importDeclaration && isIdentifier(typeName)) ensureImportIsEmitted(resolved.importDeclaration, typeName);
                 program.pushFrame();
-
                 if (type.typeArguments) {
                     for (const typeArgument of type.typeArguments) {
                         this.extractPackStructOfType(typeArgument, program);
                     }
                 }
-
                 const body = isIdentifier(typeName) ? typeName : this.createAccessorForEntityName(typeName);
                 const index = program.pushStack(this.f.createArrowFunction(undefined, undefined, [], undefined, undefined, body));
                 program.pushOp(ReflectionOp.classReference, index);
-
                 program.popFrameImplicit();
             } else if (isTypeParameterDeclaration(declaration)) {
                 this.resolveTypeParameter(declaration, type, program);
@@ -2242,7 +2271,7 @@ export class ReflectionTransformer implements CustomTransformer {
     /**
      * const fn = function() {}
      *
-     * => const fn = Object.assign(function() {}, {__type: 34})
+     * => const fn = __assignType(function() {}, [34])
      */
     protected decorateFunctionExpression(expression: FunctionExpression) {
         const encodedType = this.getTypeOfType(expression);
@@ -2257,11 +2286,24 @@ export class ReflectionTransformer implements CustomTransformer {
      * => function name() {}; name.__type = 34;
      */
     protected decorateFunctionDeclaration(declaration: FunctionDeclaration) {
+
         const encodedType = this.getTypeOfType(declaration);
         if (!encodedType) return declaration;
 
-        const statements: Statement[] = [declaration];
+        if (!declaration.name) {
+            //its likely `export default function() {}`
+            if (!declaration.body) return;
 
+            //since a new default export is created, we do not need ExportKey&DefaultKeyword on the function anymore,
+            //but it should preserve all others like Async.
+            const modifier = declaration.modifiers ? declaration.modifiers.filter(v => v.kind !== SyntaxKind.ExportKeyword && v.kind !== SyntaxKind.DefaultKeyword) : [];
+            return this.f.createExportAssignment(undefined, undefined, undefined, this.wrapWithAssignType(
+                this.f.createFunctionExpression(modifier, declaration.asteriskToken, declaration.name, declaration.typeParameters, declaration.parameters, declaration.type, declaration.body),
+                encodedType
+            ));
+        }
+
+        const statements: Statement[] = [declaration];
         statements.push(this.f.createExpressionStatement(
             this.f.createAssignment(this.f.createPropertyAccessExpression(this.nodeConverter.clone(declaration.name), '__type'), encodedType)
         ));

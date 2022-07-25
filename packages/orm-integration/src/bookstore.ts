@@ -1,8 +1,8 @@
 import { expect } from '@jest/globals';
-import { assertType, AutoIncrement, cast, entity, PrimaryKey, Reference, ReflectionClass, ReflectionKind, UUID, uuid } from '@deepkit/type';
+import { assertType, AutoIncrement, BackReference, cast, entity, PrimaryKey, Reference, ReflectionClass, ReflectionKind, UUID, uuid } from '@deepkit/type';
 import { User, UserGroup } from './bookstore/user';
 import { UserCredentials } from './bookstore/user-credentials';
-import { atomicChange, getInstanceStateFromItem } from '@deepkit/orm';
+import { atomicChange, DatabaseSession, getInstanceStateFromItem, Query } from '@deepkit/orm';
 import { isArray } from '@deepkit/core';
 import { Group } from './bookstore/group';
 import { DatabaseFactory } from './test';
@@ -172,6 +172,16 @@ export const bookstoreTests = {
 
     async uuid(databaseFactory: DatabaseFactory) {
         const database = await databaseFactory(entities);
+
+        {
+            expect(await database.query(Image).count()).toBe(0);
+            const image = new Image('/foo.jpg');
+            await database.persist(image);
+            expect(await database.query(Image).count()).toBe(1);
+            expect(await database.query(Image).filter({ id: image.id }).count()).toBe(1);
+            await database.remove(image);
+            expect(await database.query(Image).count()).toBe(0);
+        }
 
         const image = new Image('/foo.jpg');
         await database.persist(image);
@@ -612,7 +622,7 @@ export const bookstoreTests = {
 
         {
             const session = database.createSession();
-            const sub1 = database.unitOfWorkEvents.onUpdatePre.subscribe((event) => {
+            database.listen(DatabaseSession.onUpdatePre, event => {
                 if (event.isSchemaOf(User)) {
                     for (const changeSet of event.changeSets) {
                         changeSet.changes.increase('version', 1);
@@ -620,12 +630,12 @@ export const bookstoreTests = {
                 }
             });
 
-            const sub2 = database.queryEvents.onPatchPre.subscribe((event) => {
+            database.listen(Query.onPatchPre, event => {
                 if (event.isSchemaOf(User)) {
                     event.patch.increase('version', 1);
                 }
             });
-            const sub3 = database.queryEvents.onPatchPost.subscribe((event) => {
+            database.listen(Query.onPatchPost, event => {
                 if (event.isSchemaOf(User)) {
                     expect(isArray(event.patchResult.returning['version'])).toBe(true);
                     expect(event.patchResult.returning['version']![0]).toBeGreaterThan(0);
@@ -665,10 +675,6 @@ export const bookstoreTests = {
                 expect(userDB.logins).toBe(10);
                 expect(userDB.version).toBe(4);
             }
-
-            sub1.unsubscribe();
-            sub2.unsubscribe();
-            sub3.unsubscribe();
         }
         database.disconnect();
     },
@@ -732,6 +738,47 @@ export const bookstoreTests = {
             expect(review.user.id).toBe(user.id);
             expect(review.book.id).toBe(book.id);
             expect(review.status).toBe(ReviewStatus.hidden);
+        }
+        database.disconnect();
+    },
+
+    async joinWithoutHydration(databaseFactory: DatabaseFactory) {
+        @entity.name('userJoin')
+        class User {
+            id: UUID & PrimaryKey = uuid();
+            books: Book[] & BackReference = [];
+
+            constructor(public name: string) {
+            }
+        }
+
+        @entity.name('bookJoin')
+        class Book {
+            id: UUID & PrimaryKey = uuid();
+
+            constructor(public owner: User & Reference) {
+            }
+        }
+
+        const database = await databaseFactory([User, Book]);
+
+        const user = new User('user1');
+        const book = new Book(user);
+        await database.persist(book);
+
+        const user2 = new User('user2');
+        {
+            const session = database.createSession();
+            const book2 = await session.query(Book).join('owner').findOne();
+            await session.commit();
+            book2.owner = user2;
+            await session.commit();
+        }
+
+        {
+            const session = database.createSession();
+            const book3 = await session.query(Book).joinWith('owner').findOne();
+            expect(book3.owner.name).toBe('user2');
         }
         database.disconnect();
     },

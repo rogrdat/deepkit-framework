@@ -29,8 +29,7 @@ import {
     isBackReferenceType,
     isMongoIdType,
     isNullable,
-    isOptional,
-    isPropertyType,
+    isOptional, isPropertyMemberType,
     isReferenceType,
     isType,
     isUUIDType,
@@ -42,7 +41,6 @@ import {
     stringifyType,
     Type,
     TypeClass,
-    TypeFunction,
     TypeIndexSignature,
     TypeObjectLiteral,
     TypeParameter,
@@ -725,9 +723,8 @@ export function createConverterJSForMember(
         }
     }
 
-    const optional = isOptional(property instanceof ReflectionProperty ? property.property : property);
+    const setExplicitUndefined = registry.serializer.setExplicitUndefined(type, state) && isOptional(property instanceof ReflectionProperty ? property.property : property);
     const nullable = isNullable(type);
-    // const hasDefault = property instanceof ReflectionProperty ? property.hasDefault() : false;
 
     // // since JSON does not support undefined, we emulate it via using null for serialization, and convert that back to undefined when deserialization happens.
     // // note: When the value is not defined (property.name in object === false), then this code will never run.
@@ -746,7 +743,7 @@ export function createConverterJSForMember(
     //note: this code is only reached when ${accessor} was actually defined checked by the 'in' operator.
     return `
         if (${state.accessor} === undefined) {
-            if (${optional}) {
+            if (${setExplicitUndefined}) {
                 ${undefinedSetterCode}
             }
         } else if (${state.accessor} === null) {
@@ -756,7 +753,7 @@ export function createConverterJSForMember(
             if (${nullable}) {
                 ${nullSetterCode}
             } else {
-                if (${optional}) {
+                if (${setExplicitUndefined}) {
                     ${undefinedSetterCode}
                 }
             }
@@ -776,7 +773,7 @@ export function deserializeEmbedded(type: TypeClass | TypeObjectLiteral, state: 
     const embedded = embeddedAnnotation.getFirst(type);
     if (!embedded) return '';
 
-    const properties = resolveTypeMembers(type).filter(isPropertyType);
+    const properties = resolveTypeMembers(type).filter(isPropertyMemberType);
     const args: (ContainerAccessor | string)[] = [];
     const assign: (ContainerAccessor | string)[] = [];
     const loadArgs: string[] = [];
@@ -945,7 +942,7 @@ export function serializeObjectLiteral(type: TypeObjectLiteral | TypeClass, stat
                 return;
             }
         } else {
-            const properties = resolveTypeMembers(type).filter(isPropertyType);
+            const properties = resolveTypeMembers(type).filter(isPropertyMemberType);
 
             if (properties.length === 1) {
                 const first = properties[0];
@@ -1048,6 +1045,7 @@ export function serializeObjectLiteral(type: TypeObjectLiteral | TypeClass, stat
             if (excludedAnnotation.isExcluded(member.type, state.registry.serializer.name)) continue;
             signatures.push(member);
         } else if (member.kind === ReflectionKind.propertySignature || member.kind === ReflectionKind.property) {
+            if (!isPropertyMemberType(member)) continue;
             if (excludedAnnotation.isExcluded(member.type, state.registry.serializer.name)) continue;
             if (handledPropertiesInConstructor.includes(memberNameToString(member.name))) continue;
 
@@ -1141,7 +1139,7 @@ export function serializeObjectLiteral(type: TypeObjectLiteral | TypeClass, stat
 }
 
 export function typeGuardEmbedded(type: TypeClass | TypeObjectLiteral, state: TemplateState, embedded: EmbeddedOptions) {
-    const properties = resolveTypeMembers(type).filter(isPropertyType);
+    const properties = resolveTypeMembers(type).filter(isPropertyMemberType);
     if (properties.length) {
         for (const property of properties) {
             if ((property.kind == ReflectionKind.property || property.kind === ReflectionKind.propertySignature) && !excludedAnnotation.isExcluded(property.type, state.registry.serializer.name)) {
@@ -1191,7 +1189,7 @@ export function typeGuardObjectLiteral(type: TypeObjectLiteral | TypeClass, stat
             signatures.push(member);
         } else if (member.kind === ReflectionKind.propertySignature || member.kind === ReflectionKind.property || member.kind === ReflectionKind.methodSignature || member.kind === ReflectionKind.method) {
             if (member.kind === ReflectionKind.property || member.kind === ReflectionKind.method) {
-                if (member.abstract) continue;
+                if (member.abstract || member.static) continue;
             }
 
             if (member.name === 'constructor') continue;
@@ -1321,6 +1319,7 @@ export function typeGuardArray(elementType: Type, state: TemplateState) {
          let ${v} = false;
          let ${i} = 0;
          if (isIterable(${state.accessor})) {
+            ${v} = ${state.accessor}.length === 0;
             for (const ${item} of ${state.accessor}) {
                 ${executeTemplates(state.fork(v, item).extendPath(new RuntimeCode(i)), elementType)}
                 if (!${v}) break;
@@ -1701,6 +1700,10 @@ export class Serializer {
         this.registerSerializers();
         this.registerTypeGuards();
         this.registerValidators();
+    }
+
+    public setExplicitUndefined(type: Type, state: TemplateState): boolean {
+        return true;
     }
 
     protected registerValidators() {

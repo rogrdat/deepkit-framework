@@ -1,14 +1,13 @@
 import { expect, test } from '@jest/globals';
-import { dotToUrlPath, RouteParameterResolverContext, HttpRouter, UploadedFile, RouteClassControllerAction } from '../src/router';
+import { dotToUrlPath, HttpRouter, RouteClassControllerAction, RouteParameterResolverContext, UploadedFile } from '../src/router';
 import { http, httpClass } from '../src/decorator';
-import { HttpBadRequestError, httpWorkflow, JSONResponse, Response } from '../src/http';
+import { HtmlResponse, HttpBadRequestError, httpWorkflow, JSONResponse, Response } from '../src/http';
 import { eventDispatcher } from '@deepkit/event';
 import { HttpBody, HttpBodyValidation, HttpQueries, HttpQuery, HttpRegExp, HttpRequest } from '../src/model';
-import { getClassName, sleep } from '@deepkit/core';
+import { getClassName, isObject, sleep } from '@deepkit/core';
 import { createHttpKernel } from './utils';
-import { Group, MinLength } from '@deepkit/type';
-import { HttpModule } from '../src/module.js';
-import { HttpKernel } from '../src/kernel.js';
+import { Group, MinLength, PrimaryKey, Reference } from '@deepkit/type';
+import { Readable } from 'stream';
 
 test('router', async () => {
     class Controller {
@@ -16,8 +15,12 @@ test('router', async () => {
         helloWorld() {
         }
 
-        @http.GET(':name')
+        @http.GET('/a/:name')
         hello(name: string) {
+        }
+
+        @http.GET('/b/:name')
+        helloButNoParam() {
         }
 
         @http.GET('/user/:id/static')
@@ -35,15 +38,16 @@ test('router', async () => {
 
     const router = HttpRouter.forControllers([Controller]);
 
-    expect((await router.resolve('GET', '/'))?.routeConfig.action).toMatchObject({ controller: Controller, methodName: 'helloWorld' });
-    expect((await router.resolve('GET', '/peter'))?.routeConfig.action).toMatchObject({ controller: Controller, methodName: 'hello' });
-    expect((await router.resolve('GET', '/peter'))?.parameters!(undefined as any)).toEqual(['peter']);
+    expect(router.resolve('GET', '/')?.routeConfig.action).toMatchObject({ controller: Controller, methodName: 'helloWorld' });
+    expect(router.resolve('GET', '/a/peter')?.routeConfig.action).toMatchObject({ controller: Controller, methodName: 'hello' });
+    expect(router.resolve('GET', '/a/peter')?.parameters!(undefined as any)).toEqual(['peter']);
+    expect(router.resolve('GET', '/b/peter')).toBeDefined();
 
-    const userStatic = await router.resolve('GET', '/user/1233/static');
+    const userStatic = router.resolve('GET', '/user/1233/static');
     expect(userStatic?.routeConfig.action).toMatchObject({ controller: Controller, methodName: 'userStatic' });
     expect(userStatic?.parameters!(undefined as any)).toEqual(['1233']);
 
-    const userStatic2 = await router.resolve('GET', '/user2/1233/static/123');
+    const userStatic2 = router.resolve('GET', '/user2/1233/static/123');
     expect(userStatic2?.routeConfig.action).toMatchObject({ controller: Controller, methodName: 'userStatic2' });
     expect(userStatic2?.parameters!(undefined as any)).toEqual(['1233', '123']);
 });
@@ -60,6 +64,31 @@ test('any', async () => {
     expect(((await router.resolve('GET', '/any'))!.routeConfig.action as RouteClassControllerAction).methodName).toEqual('any');
     expect(((await router.resolve('POST', '/any'))!.routeConfig.action as RouteClassControllerAction).methodName).toEqual('any');
     expect(((await router.resolve('OPTIONS', '/any'))!.routeConfig.action as RouteClassControllerAction).methodName).toEqual('any');
+});
+
+test('explicitly annotated response objects', async () => {
+    class Controller {
+        @http.GET('/a')
+        a(): JSONResponse {
+            return new JSONResponse('a');
+        }
+
+        @http.GET('/b')
+        b(): HtmlResponse {
+            return new HtmlResponse('b');
+        }
+
+        @http.GET('/c')
+        c(): Response {
+            return new Response('c', 'text/plain');
+        }
+    }
+
+    const httpKernel = createHttpKernel([Controller]);
+
+    expect((await httpKernel.request(HttpRequest.GET('/a'))).bodyString).toBe('"a"');
+    expect((await httpKernel.request(HttpRequest.GET('/b'))).bodyString).toBe('b');
+    expect((await httpKernel.request(HttpRequest.GET('/c'))).bodyString).toBe('c');
 });
 
 test('router parameters', async () => {
@@ -115,7 +144,7 @@ test('generic response', async () => {
     expect(xmlResponse.getHeader('content-type')).toBe('text/xml');
 });
 
-test('router HttpRequest', async () => {
+test('HttpRegExp deep path', async () => {
     class Controller {
         @http.GET(':path')
         anyReq(req: HttpRequest, path: HttpRegExp<string, '.*'>) {
@@ -126,6 +155,46 @@ test('router HttpRequest', async () => {
     const httpKernel = createHttpKernel([Controller]);
 
     expect((await httpKernel.request(HttpRequest.GET('/req/any/path'))).json).toEqual(['/req/any/path', 'req/any/path']);
+});
+
+test('HttpRegExp match', async () => {
+    const pattern = /one|two/;
+
+    class Controller {
+        @http.GET('string/:text')
+        text(text: HttpRegExp<string, '[a-zA-Z]*'>) {
+            return [text];
+        }
+
+        @http.GET('number/:number')
+        number(number: HttpRegExp<number, '[0-9]*'>) {
+            return [number];
+        }
+
+        @http.GET('type/:type')
+        type(type: HttpRegExp<string, typeof pattern>) {
+            return [type];
+        }
+
+        @http.GET('type2/:type')
+        type2(type: 'one' | 'two') {
+            return [type];
+        }
+    }
+
+    const httpKernel = createHttpKernel([Controller]);
+
+    expect((await httpKernel.request(HttpRequest.GET('/number/23'))).json).toEqual([23]);
+    expect((await httpKernel.request(HttpRequest.GET('/number/asd'))).statusCode).toBe(404);
+    expect((await httpKernel.request(HttpRequest.GET('/string/peter'))).json).toEqual(['peter']);
+
+    expect((await httpKernel.request(HttpRequest.GET('/type/one'))).json).toEqual(['one']);
+    expect((await httpKernel.request(HttpRequest.GET('/type/two'))).json).toEqual(['two']);
+    expect((await httpKernel.request(HttpRequest.GET('/type/nope'))).statusCode).toEqual(404);
+
+    expect((await httpKernel.request(HttpRequest.GET('/type2/one'))).json).toEqual(['one']);
+    expect((await httpKernel.request(HttpRequest.GET('/type2/two'))).json).toEqual(['two']);
+    expect((await httpKernel.request(HttpRequest.GET('/type2/nope'))).statusCode).toEqual(400);
 });
 
 test('router parameter resolver by class', async () => {
@@ -784,6 +853,35 @@ test('use http.response for serialization', async () => {
     expect((await httpKernel.request(HttpRequest.GET('/action3'))).json).toEqual([{ message: 'error' }, { message: '1' }]);
 });
 
+test('reference in query', async () => {
+    interface Group {
+        id: number & PrimaryKey;
+    }
+
+    interface User {
+        id: number;
+        group: Group & Reference;
+    }
+
+    class Controller {
+        @http.GET('/user')
+        action1(filter: HttpQuery<Partial<User>>) {
+            return {
+                isGroup: isObject(filter.group),
+                objectName: getClassName(filter.group!),
+                groupId: filter.group!.id,
+            };
+        }
+    }
+
+    const httpKernel = createHttpKernel([Controller]);
+    expect((await httpKernel.request(HttpRequest.GET('/user?filter[group]=2'))).json).toEqual({
+        isGroup: true,
+        objectName: 'ObjectReference',
+        groupId: 2,
+    });
+});
+
 test('BodyValidation', async () => {
     class User {
         username!: string & MinLength<3>;
@@ -830,3 +928,29 @@ test('BodyValidation', async () => {
     expect((await httpKernel.request(HttpRequest.POST('/action3').json({ username: 'Peter' }))).json).toEqual({ username: 'Peter' });
     expect((await httpKernel.request(HttpRequest.POST('/action3').json({ username: 'Pe' }))).bodyString).toEqual(`{"message":"Invalid: Min length is 3"}`);
 });
+
+//disabled for the moment since critical functionality has been removed
+// test('stream', async () => {
+//     class Controller {
+//         @http.GET()
+//         handle() {
+//             return Readable.from(['test']);
+//         }
+//     }
+//     const httpKernel = createHttpKernel([Controller]);
+//     const response = (await httpKernel.request(HttpRequest.GET('/')));
+//     expect(response.statusCode).toBe(200);
+//     expect(response.bodyString).toBe('test');
+// });
+// test('stream error', async () => {
+//     class Controller {
+//         @http.GET()
+//         handle() {
+//             return new Readable().emit('error', new Error());
+//         }
+//     }
+//     const httpKernel = createHttpKernel([Controller]);
+//     const response = (await httpKernel.request(HttpRequest.GET('/')));
+//     expect(response.statusCode).toBe(500);
+//     expect(response.bodyString).toBe('Internal error');
+// });

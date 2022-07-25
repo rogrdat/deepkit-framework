@@ -253,3 +253,52 @@ test('chained optional methods', () => {
     console.log(res);
     expect(res).toEqual([[1, '.!'], undefined]);
 });
+
+test('readonly constructor properties', () => {
+    const res = transpileAndRun({
+        'app': `
+           class User {
+              constructor(readonly id: number) {}
+           }
+        `
+    });
+
+    console.log(res);
+});
+
+test('readonly array', () => {
+    const res = transpileAndRun({
+        'app': `
+            interface Post {
+                id: number;
+            }
+
+            interface User {
+                readonly id: number;
+                readonly posts: readonly Post[]
+            }
+        `
+    });
+
+    console.log(res);
+});
+
+test('enum union', () => {
+    const res = transpileAndRun({
+        'app': `
+            enum StatEnginePowerUnit {
+                Hp,
+            }
+
+            enum StatWeightUnit {
+                Lbs,
+                Kg,
+            }
+
+            type StatMeasurementUnit = StatEnginePowerUnit | StatWeightUnit;
+            typeOf<StatMeasurementUnit>()
+        `
+    });
+
+    console.log(res);
+});
